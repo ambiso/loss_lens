@@ -81,6 +81,8 @@ fn main() -> eyre::Result<()> {
                                 if let Some(packets_received) = time_slots.pop_front() {
                                     let new_rx = packets_received.count_ones();
                                     received += new_rx;
+                                    // TODO: compression
+                                    // TODO: write timestamps
                                     out.write_all(&[new_rx as u8])?;
                                     out.flush()?;
                                     total_packets += SLOT_SIZE;
