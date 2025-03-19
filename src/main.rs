@@ -1,5 +1,7 @@
 use std::{
     collections::VecDeque,
+    fs::File,
+    io::{stdout, BufWriter, Write},
     net::{Ipv6Addr, SocketAddr, ToSocketAddrs},
 };
 
@@ -44,11 +46,10 @@ fn main() -> eyre::Result<()> {
 
     let args = args::Args::parse();
 
-    // Number of milliseconds to keep track of packets
-    const LATE_WINDOW: usize = 3000;
+    // Number of packets to keep track of
+    const LATE_WINDOW: usize = PACKETS_PER_SECOND * 3;
     // Number of milliseconds between packets
-    const PACKET_RATE: usize = 1000 / 67;
-
+    const PACKETS_PER_SECOND: usize = 6700;
 
     match args.command {
         args::Commands::Client { host } => {
@@ -66,34 +67,42 @@ fn main() -> eyre::Result<()> {
                     let mut seq_offset = 1;
                     let mut received = 0;
                     let mut total_packets = 0;
+                    let mut last_print = 0;
+                    // let mut out = stdout().lock();
+
+                    let mut out = BufWriter::new(File::create("out")?);
                     loop {
                         let (n, _addr) = socket.recv_from(&mut buf)?;
-                        if n == PACKET_SIZE {
+                        if n == PACKET_SIZE && buf[0] == ACK_PACKET_CONST {
                             let received_seq = u32::from_be_bytes(buf[1..5].try_into().unwrap());
                             // account for reordering by keeping track of which sequence numbers have not been responded to yet
                             // remove overly late packets from the datastructure and count them as lost
-                            while time_slots.len() * SLOT_SIZE > LATE_WINDOW / PACKET_RATE {
+                            while time_slots.len() * SLOT_SIZE > LATE_WINDOW {
                                 if let Some(packets_received) = time_slots.pop_front() {
-                                    received += packets_received.count_ones();
+                                    let new_rx = packets_received.count_ones();
+                                    received += new_rx;
+                                    out.write_all(&[new_rx as u8])?;
+                                    out.flush()?;
                                     total_packets += SLOT_SIZE;
-                                    seq_offset += 1;
+                                    seq_offset += SLOT_SIZE;
                                 }
                             }
-                            println!("{time_slots:?} {received_seq:?} {seq_offset:?}");
 
                             // packet already counted as lost if it didn't arrive within this window
                             if received_seq as usize >= seq_offset {
-                            // make space for new sequence numbers
-                            while received_seq as usize >= time_slots.len() * SLOT_SIZE + seq_offset
-                            {
-                                time_slots.push_back(0u64);
-                            }
+                                // make space for new sequence numbers
+                                while received_seq as usize
+                                    >= time_slots.len() * SLOT_SIZE + seq_offset
+                                {
+                                    time_slots.push_back(0u64);
+                                }
                                 let idx = received_seq as usize - seq_offset;
-                                dbg!(idx);
                                 time_slots[idx / SLOT_SIZE] |= 1 << (idx % SLOT_SIZE);
                             }
 
-                            if received_seq % 30 == 0 {
+                            if total_packets - last_print > PACKETS_PER_SECOND && total_packets > 0
+                            {
+                                last_print = total_packets;
                                 let elapsed = start_time.elapsed().as_secs_f64();
                                 let loss_percentage =
                                     100.0 * (1.0 - (received as f64 / total_packets as f64));
@@ -115,14 +124,16 @@ fn main() -> eyre::Result<()> {
                 }
             });
 
-            for seq in 1u32.. {
+            for seq in 0u32.. {
                 let mut buf = [0u8; PACKET_SIZE];
                 buf[0] = SEQ_NUM_PACKET_CONST;
                 buf[1..5].copy_from_slice(&seq.to_be_bytes());
 
                 socket.send_to(&buf, addr)?;
 
-                thread::sleep(Duration::from_millis(PACKET_RATE as u64));
+                thread::sleep(Duration::from_nanos(
+                    1_000_000_000 / PACKETS_PER_SECOND as u64,
+                ));
             }
         }
         args::Commands::Server { host } => {
@@ -132,10 +143,11 @@ fn main() -> eyre::Result<()> {
                 let mut buf = [0u8; PACKET_SIZE];
 
                 match socket.recv_from(&mut buf) {
-                    Ok((n, addr)) if n >= 4 => {
-                        if rand::random_bool(0.5) {
-                            socket.send_to(&buf, addr)?;
-                        }
+                    Ok((n, addr)) if n >= 5 => {
+                        buf[0] = ACK_PACKET_CONST;
+                        // if rand::random_bool(0.5) {
+                        socket.send_to(&buf, addr)?;
+                        // }
                     }
                     _ => {}
                 }
