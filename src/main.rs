@@ -108,12 +108,26 @@ fn main() -> eyre::Result<()> {
                     socket.set_read_timeout(Some(Duration::from_millis(50)))?;
 
                     let rv = (|| {
+                        let mut last_recv: Option<Instant> = None;
+                        let mut lags = [0; 10];
                         while !done.load(Ordering::SeqCst) {
                             let (n, _addr) = match socket.recv_from(&mut buf) {
                                 Ok(x) => Ok(x),
                                 Err(e) if e.kind() == ErrorKind::WouldBlock => continue,
                                 x => x,
                             }?;
+                            if let Some(last) = last_recv {
+                                let dur = last.elapsed().as_millis() / 100;
+                                if dur >= 1 {
+                                    dbg!(last.elapsed());
+                                    if (dur as usize) < lags.len() {
+                                        lags[dur as usize] += 1;
+                                    } else {
+                                        lags[lags.len() - 1] += 1;
+                                    }
+                                }
+                            }
+                            last_recv = Some(Instant::now());
                             if n == SERVER_TO_CLIENT_PACKET_SIZE && buf[0] == ACK_PACKET_CONST {
                                 let received_seq =
                                     u32::from_be_bytes(buf[1..5].try_into().unwrap());
@@ -161,15 +175,24 @@ fn main() -> eyre::Result<()> {
                                     println!();
                                     println!(
                                         "Estimated traffic: {:.02} KiB/s",
-                                        2.0 * ((client_sent * (20 + 8 + 4)) as f64
+                                        (((client_sent + server_received) * (54)) as f64
                                             / (1 << 10) as f64)
-                                            / start_time.elapsed().as_secs_f64()
+                                            / elapsed
                                     );
                                     println!("Client sent    : {client_sent}",);
                                     println!("Server received: {server_received}");
                                     println!("Client received: {client_received}");
                                     println!("Client   upstream loss: {upstream_loss:.2}%");
                                     println!("Client downstream loss: {downstream_loss:.2}%");
+                                    print!("Lags per hour: ");
+                                    let mut lags = lags.clone();
+                                    for i in (0..lags.len() - 1).rev() {
+                                        lags[i] += lags[i + 1];
+                                    }
+                                    for (i, x) in lags[1..].iter().enumerate() {
+                                        print!("{:.02} (>={}ms), ", *x as f64 / elapsed * 3600.0, (i+1)*100);
+                                    }
+                                    println!("");
                                     println!("Time elapsed: {elapsed:.2} seconds");
                                 }
                             }
@@ -177,7 +200,7 @@ fn main() -> eyre::Result<()> {
                         Ok(())
                     })();
                     out.flush()?;
-                    cmd.wait_with_output()?;
+                    dbg!(cmd.wait_with_output())?;
                     rv
                 }
             });
